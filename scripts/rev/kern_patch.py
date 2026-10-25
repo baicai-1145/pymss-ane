@@ -170,3 +170,48 @@ def find_td_records(d, kern_off, kern_len):
         if v in RELOC_REGS:
             hits.append((off, v, RELOC_REGS[v]))
     return hits
+
+
+# ---- M4 rt command-stream decoder (task-3 §3: ZinRtCommandIterator protocol) --
+def decode_command_stream(u32_words):
+    """Yield per-command dicts: word0 -> N values -> word0 -> ...
+
+    type1 (sequential): w0>>29 !=0, ((w0>>30)&2)==0
+        N = ((w0>>15)&0x3f)+1, FieldNumber = w0 & 0x7fff (base byte addr = fn*4)
+    type2 (mask): ((w0>>30)&2)!=0
+        mask = (w0>>15)&0xffff, N = popcount(mask)-1
+    terminator: w0>>29 == 0
+    """
+    i, n = 0, len(u32_words)
+    while i < n:
+        w0 = u32_words[i]
+        if (w0 >> 29) == 0:
+            break
+        ctype = 2 if ((w0 >> 30) & 2) else 1
+        if ctype == 1:
+            count = ((w0 >> 15) & 0x3F) + 1
+        else:
+            mask = (w0 >> 15) & 0xFFFF
+            count = bin(mask).count("1") - 1
+            if count < 0:
+                break
+        vals = list(u32_words[i + 1: i + 1 + count])
+        yield {"off": i, "w0": w0, "type": ctype, "field": w0 & 0x7FFF,
+               "count": count, "values": vals}
+        i += 1 + count
+
+
+# ---- anehash (content-address key for bundles) ------------------------------
+def recompute_anehash(e5_bytes: bytes, container_bytes: bytes) -> str:
+    """anehash = SHA256(e5)_SHA256(runtime container), uppercase hex, '_' joined.
+
+    Differential evidence (task-17, c2/c4/c5/c_softmax dumps): first half
+    identical across ops (same E5), second half differs per op (container
+    carries op identity). Disk loads verify via verifyBundleAtPath
+    (AppleNeuralEngine, dsc extract) -> patching a bundle file requires
+    recomputing this key.
+    """
+    import hashlib
+    h1 = hashlib.sha256(e5_bytes).hexdigest().upper()
+    h2 = hashlib.sha256(container_bytes).hexdigest().upper()
+    return f"{h1}_{h2}"
