@@ -7,7 +7,7 @@ import subprocess
 import sys
 from collections import Counter
 
-DSC = "/Volumes/2T/repos/mss/ane-ref/dsc/ANECompiler"
+DSC = "/Volumes/2T/repos/mss/ane-ref/dsc/Espresso"
 
 start = int(sys.argv[1], 16)
 end = int(sys.argv[2], 16)
