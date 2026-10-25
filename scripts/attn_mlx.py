@@ -237,6 +237,9 @@ def cos_sim(a, b):
 # timing
 # --------------------------------------------------------------------------- #
 def bench(fn, n=30, warm=8):
+    """Returns (min_ms, p50_ms). min = best-case (exclusive GPU), p50 = typical.
+    Environment contract: foreground terminal, AC power, no other GPU-heavy
+    process running (verify with `pgrep -fl 'inference|metal|CoreML'`)."""
     for _ in range(warm):
         out = fn()
     mx.eval(out)
@@ -247,7 +250,7 @@ def bench(fn, n=30, warm=8):
         mx.eval(out)
         ts.append(time.perf_counter() - t0)
     ts.sort()
-    return ts[len(ts) // 2] * 1000  # p50 ms
+    return ts[0] * 1000, ts[len(ts) // 2] * 1000
 
 
 def pipeline(vfn, x0, layers=12):
@@ -308,40 +311,53 @@ def main():
                 mx.eval(y)
                 parity[name] = cos_sim(y, ref)
 
-            # ---- single-layer timing ----
-            single = {name: bench(lambda vfn=vfn: vfn(x0), n=args.iters) for name, vfn in variants.items()}
+            # ---- single-layer timing (min, p50) ----
+            single = {}
+            single_p50 = {}
+            for name, vfn in variants.items():
+                mn, p50 = bench(lambda vfn=vfn: vfn(x0), n=args.iters)
+                single[name] = mn
+                single_p50[name] = p50
 
             # ---- hybrid-split core timing (rope+SDPA+gate only, qkv precomputed) ----
             xn = mx.fast.rms_norm(x0, w["norm_gamma"], eps=1e-12)
             qkv0 = _proj_qkv(xn, w, B, S, H, dh)
             mx.eval(xn, qkv0)
-            core = bench(lambda: attn_core_opt(qkv0, xn, w, cos, sin, H, dh), n=args.iters)
+            core_min, core_p50 = bench(lambda: attn_core_opt(qkv0, xn, w, cos, sin, H, dh), n=args.iters)
+            core = core_p50
             q_r, k_r = rope_metal(qkv0, cos, sin, H, dh)
             v_r = qkv0[:, :, 2].transpose(0, 2, 1, 3)
             mx.eval(q_r, k_r, v_r)
-            sdpa_only = bench(
+            sdpa_min, sdpa_p50 = bench(
                 lambda: mx.fast.scaled_dot_product_attention(q_r, k_r, v_r, scale=dh ** -0.5),
                 n=args.iters,
             )
+            sdpa_only = sdpa_p50
 
             # ---- 12-layer chained pipeline (real dependency, residual included) ----
             pipe = {}
+            pipe_p50 = {}
             for name, vfn in variants.items():
                 run = pipeline(vfn, x0, layers=args.layers)
-                pipe[name] = bench(run, n=max(8, args.iters // 3))
-            row = dict(T=T, dir=label, B=B, S=S, parity=parity, single_ms=single,
-                       core_hybrid_ms=core, sdpa_only_ms=sdpa_only, pipeline_ms=pipe)
+                mn, p50 = bench(run, n=max(8, args.iters // 3))
+                pipe[name] = mn
+                pipe_p50[name] = p50
+            row = dict(T=T, dir=label, B=B, S=S, parity=parity,
+                       single_min_ms=single, single_p50_ms=single_p50,
+                       core_min_ms=core_min, core_p50_ms=core_p50,
+                       sdpa_only_min_ms=sdpa_min, sdpa_only_p50_ms=sdpa_p50,
+                       pipeline_min_ms=pipe, pipeline_p50_ms=pipe_p50)
             results["rows"].append(row)
 
             ps = "  ".join(f"{k}={v:.6f}" for k, v in parity.items())
-            ss = "  ".join(f"{k}={v:.2f}" for k, v in single.items())
-            pp = "  ".join(f"{k}={v:.1f}" for k, v in pipe.items())
+            ss = "  ".join(f"{k}={single[k]:.2f}/{single_p50[k]:.2f}" for k in single)
+            pp = "  ".join(f"{k}={pipe[k]:.1f}/{pipe_p50[k]:.1f}" for k in pipe)
             print(f"\n=== T={T} {label} (B={B},S={S},M={B*S}) ===")
             print(f"  parity cos : {ps}")
-            print(f"  1-layer ms : {ss}")
-            print(f"  core(hybrid split: rope+sdpa+gate) = {core:.2f}ms   sdpa-only = {sdpa_only:.2f}ms")
-            print(f"  {args.layers}-layer chained ms: {pp}")
-            print(f"  GPU budget: all-GPU(opt)={pipe['opt_metal_rope']:.0f}ms  hybrid-split(core)x{args.layers}={core*args.layers:.0f}ms")
+            print(f"  1-layer ms (min/p50) : {ss}")
+            print(f"  core(hybrid split) min={core_min:.2f} p50={core_p50:.2f}ms   sdpa-only min={sdpa_min:.2f} p50={sdpa_p50:.2f}ms")
+            print(f"  {args.layers}-layer chained ms (min/p50): {pp}")
+            print(f"  GPU budget: all-GPU(opt)={pipe_p50['opt_metal_rope']:.0f}ms  hybrid-split(core)p50 x{args.layers}={core_p50*args.layers:.0f}ms min-based={core_min*args.layers:.0f}ms")
 
     if args.json_out:
         with open(args.json_out, "w") as f:
