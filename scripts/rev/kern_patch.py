@@ -140,3 +140,33 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+# ---- TD record surgery (ane-guide ch23 + task-3 ISA) ------------------------
+# 44B register-write records: [count u32][reg u32][addr0 u64][addr1 u64]? —
+# exact framing locked against task-16 plaintext dump. Reloc regs (v10/M1):
+#   0x1344 input tile | 0x134a second operand | 0x1442 output tile write
+#   0x1554 bias | 0x1558 post-scale | 0x155c palette | 0x1560 activation LUT
+# NOTE: M4/H16G uses a different versioned image (field offsets move);
+# validate against dump before patching.
+
+RELOC_REGS = {
+    0x1344: "input_tile_base",
+    0x134A: "src2_base",
+    0x1442: "output_tile_base",
+    0x1554: "bias_stream",
+    0x1558: "postscale_stream",
+    0x155C: "palette_lut",
+    0x1560: "activation_lut",
+}
+
+
+def find_td_records(d, kern_off, kern_len):
+    """Scan a kernel section for 44B register-write records (framing TBD)."""
+    # Heuristic v0: look for the known reloc register addresses as u32.
+    hits = []
+    for off in range(kern_off, kern_off + kern_len - 4, 4):
+        v = struct.unpack_from("<I", d, off)[0]
+        if v in RELOC_REGS:
+            hits.append((off, v, RELOC_REGS[v]))
+    return hits
