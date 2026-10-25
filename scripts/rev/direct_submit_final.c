@@ -94,25 +94,39 @@ int main(int argc, char **argv) {
         if (!rc && port) { printf("OUT PORT FOUND: %s\n", cands[i]); port_rel(&port); }
     }
     // also enumerate what op_create knows: try common output names
-    const char *outs[] = {"output", "out", "y", "result", "var", NULL};
-    for (int i = 0; outs[i]; i++) {
+    const char *probe_outs[] = {"output", "out", "y", "result", "var", NULL};
+    for (int i = 0; probe_outs[i]; i++) {
         void *port = NULL;
-        rc = retain_out(op, outs[i], &port);
-        if (!rc && port) { printf("OUT: %s ok\n", outs[i]); port_rel(&port); }
+        rc = retain_out(op, probe_outs[i], &port);
+        if (!rc && port) { printf("OUT: %s ok\n", probe_outs[i]); port_rel(&port); }
     }
     printf("probe done\n");
 
     // full run: bind buffers to found ports, prepare, encode, submit
+    // single-port bind with sizes from argv (usage: dsf <bundle> <fn> [insz outsz])
+    size_t isz = argc > 3 ? strtoull(argv[3], 0, 0) : 35520;
+    size_t osz = argc > 4 ? strtoull(argv[4], 0, 0) : 26356;
     void *in_port = NULL, *out_port = NULL;
     retain_in(op, "input", &in_port);
     retain_out(op, "output", &out_port);
-    if (!in_port || !out_port) { printf("port missing\n"); return 3; }
+    if (!in_port || !out_port) { printf("port missing in=%p out=%p\n", in_port, out_port); return 3; }
     void *in_buf = NULL, *out_buf = NULL, *in_ptr = NULL, *out_ptr = NULL;
-    buf_alloc(&in_buf, 1 << 20, 0);          // 1MB input
-    buf_alloc(&out_buf, 1 << 20, 0);         // 1MB output
+    printf("bind in rc=%d\n", bind(in_port, (buf_alloc(&in_buf, (isz+63)&~(size_t)63, 0), in_buf)));
+    printf("bind out rc=%d\n", bind(out_port, (buf_alloc(&out_buf, (osz+63)&~(size_t)63, 0), out_buf)));
     buf_ptr(in_buf, &in_ptr); buf_ptr(out_buf, &out_ptr);
-    memset(in_ptr, 0, 1 << 16);
-    printf("bind in=%d out=%d\n", bind(in_port, in_buf), bind(out_port, out_buf));
+    memset(in_ptr, 0, isz);
+    // completion event BEFORE encode
+    typedef e5rt_error_code_t (*f_evt_create)(void **, const char *, int);
+    typedef e5rt_error_code_t (*f_evt_bind)(void *, void *);
+    f_evt_create evt_create = (f_evt_create)dlsym(fw, "e5rt_async_event_create");
+    if (!evt_create) evt_create = (f_evt_create)dlsym(fw, "_e5rt_async_event_create");
+    f_evt_bind evt_bind = (f_evt_bind)dlsym(fw, "e5rt_execution_stream_operation_bind_completion_event");
+    if (!evt_bind) evt_bind = (f_evt_bind)dlsym(fw, "_e5rt_execution_stream_operation_bind_completion_event");
+    void *evt = NULL;
+    if (evt_create && evt_bind) {
+        printf("evt_create=%d\n", evt_create(&evt, "done", 0));
+        if (evt) { printf("evt_bind=%d\n", evt_bind(op, evt)); }
+    }
     void *prep = dlsym(fw, "e5rt_execution_stream_operation_prepare_op_for_encode");
     if (!prep) prep = dlsym(fw, "_e5rt_execution_stream_operation_prepare_op_for_encode");
     typedef e5rt_error_code_t (*f_prep)(void *);
