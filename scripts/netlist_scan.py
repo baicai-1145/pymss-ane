@@ -59,7 +59,7 @@ ALL_OPS = sorted(set(list(NL.UNARY_NEURONS) + list(NL.UNARY_ELEMENTWISE)
     "conv_add_relu", "relu_chain", "conv_chain", "sdpa",
 ]))
 
-REPORT = Path("/Volumes/2T/repos/mss/.pi/herdr-team/6kq413/reports")
+REPORT = Path(".tmp/reports")
 
 
 def run_one(op: str, *, width=4, height=1, channels=1, depth=1, extra_kwargs=None) -> dict:

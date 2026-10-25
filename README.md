@@ -3,24 +3,24 @@
 mel-band-roformer-deux (becruily) 的 ANE (Apple Neural Engine) 移植——M4 上以
 单程序 MIL 全图编译运行，多档 T 全面快于 MLX 基线。
 
+> 权重与配置不在仓库内（418MB）。需要：`weights/`（manifest.json 索引的 npz 权重，
+> 由 `scripts/extract_weights.py` 从原始 checkpoint 生成）和模型配置 yaml
+> （默认路径可用 `--config` 覆盖）。
+
 ## 快速开始
 
 ```bash
-# 依赖：.venv（含 aneforge）、weights/（manifest.json 索引的 npz 权重）、
-#        /Volumes/nfs/data/Downloads/mel-band-roformer-deux/config_deux_becruily.yaml
+# 依赖：.venv（含 aneforge，uv sync 安装）、weights/、模型配置 yaml
+uv sync
 
-# 编译 + 推理单发
-.venv/bin/python scripts/build_graph.py --T 256
+# 编译 + 推理单发（--config 指向你的 yaml）
+.venv/bin/python scripts/build_graph.py --T 256 --config /path/to/config.yaml
 
 # bench 矩阵（T=64/128/256/512 × p50/TFLOPS）
 .venv/bin/python scripts/bench.py
 
 # parity（numpy fp64 参考）
 .venv/bin/python scripts/parity.py --T 512
-
-# MLX 对照（需 pymss-core venv 的 torch+mlx）
-cd /tmp && /Volumes/2T/repos/mss/pymss-core/.venv/bin/python \
-    /Volumes/2T/repos/mss/pymss-ane/scripts/bench_mlx.py
 ```
 
 ## 性能（M4, N=30 p50, 2026-10-25）

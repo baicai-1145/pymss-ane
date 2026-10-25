@@ -178,35 +178,45 @@ def attn(x: af.Tensor, w: dict, cfg: dict, rope, pfx: str) -> af.Tensor:
     # (query-side slicing trips an Espresso layout-inference bug after merge)
     CH = cfg.get("attn_chunk", 100000)   # single-block by default: chunked merge loses fp16 accuracy at depth AND runs slower (no tile-resident scheduling in Espresso)
     n_ch = (seq + CH - 1) // CH
-    ms, ss, os_ = [], [], []
     kt = k.transpose(list(range(rank - 2)) + [rank - 1, rank - 2])   # [B,h,dh,S]
-    for c in range(n_ch):
-        a = min(c * CH, seq)
-        b = min((c + 1) * CH, seq)
-        sz = b - a
-        ktc = kt.slice_by_size([0] * (rank - 1) + [a], list(kt.shape[:-1]) + [sz])
-        vc = v.slice_by_size([0] * (rank - 2) + [a, 0], list(v.shape[:-2]) + [sz, dh])
-        sim = q @ ktc                                          # [B,h,S,sz]
-        m = sim.amax(-1)                                      # [B,h,S,1]
-        e = ((sim - m) * LOG2E).exp2()
-        s = e @ np.ones((sz, 1), F16)   # row sum as matmul: fp16 narrow accumulator over K=512+ loses ~2e-3/layer
-        o = e @ vc                                            # [B,h,S,dh]
-        ms.append(m); ss.append(s); os_.append(o)
-    if n_ch == 1:
-        o, s = os_[0], ss[0]
+    # softmax lowering A/B: native MIL softmax(axis=-1) measured 7.3-7.9% faster
+    # than the manual amax/exp2 chain on production shapes (diagnose_ane_native_softmax,
+    # .tmp/ane_native_softmax.json). Default on for the single-block path; chunked
+    # mode still needs the manual pieces for exact (m,s,o) merging.
+    if cfg.get("attn_native_softmax", True) and n_ch == 1:
+        sim = q @ kt                                          # [B,h,S,S]
+        p = sim.softmax(-1)                                   # [B,h,S,S]
+        o = p @ v                                             # [B,h,S,dh]
+        o = o.transpose(ph).reshape(B + (seq, hd))
     else:
-        M = ms[0]
-        for m_ in ms[1:]:
-            M = af.maximum(M, m_)
-        S = ss[0] * ((ms[0] - M) * LOG2E).exp2()
-        O = os_[0] * ((ms[0] - M) * LOG2E).exp2()
-        for i in range(1, n_ch):
-            wc = ((ms[i] - M) * LOG2E).exp2()
-            S = S + ss[i] * wc
-            O = O + os_[i] * wc
-        o, s = O, S
-    o = o / s                                                  # [B,h,S,dh]
-    o = o.transpose(ph).reshape(B + (seq, hd))
+        ms, ss, os_ = [], [], []
+        for c in range(n_ch):
+            a = min(c * CH, seq)
+            b = min((c + 1) * CH, seq)
+            sz = b - a
+            ktc = kt.slice_by_size([0] * (rank - 1) + [a], list(kt.shape[:-1]) + [sz])
+            vc = v.slice_by_size([0] * (rank - 2) + [a, 0], list(v.shape[:-2]) + [sz, dh])
+            sim = q @ ktc                                          # [B,h,S,sz]
+            m = sim.amax(-1)                                      # [B,h,S,1]
+            e = ((sim - m) * LOG2E).exp2()
+            s = e @ np.ones((sz, 1), F16)   # row sum as matmul: fp16 narrow accumulator over K=512+ loses ~2e-3/layer
+            o = e @ vc                                            # [B,h,S,dh]
+            ms.append(m); ss.append(s); os_.append(o)
+        if n_ch == 1:
+            o, s = os_[0], ss[0]
+        else:
+            M = ms[0]
+            for m_ in ms[1:]:
+                M = af.maximum(M, m_)
+            S = ss[0] * ((ms[0] - M) * LOG2E).exp2()
+            O = os_[0] * ((ms[0] - M) * LOG2E).exp2()
+            for i in range(1, n_ch):
+                wc = ((ms[i] - M) * LOG2E).exp2()
+                S = S + ss[i] * wc
+                O = O + os_[i] * wc
+            o, s = O, S
+        o = o / s                                                  # [B,h,S,dh]
+        o = o.transpose(ph).reshape(B + (seq, hd))
     gates = big_linear(xn, w[f"{pfx}.to_gates.weight"], bias=w[f"{pfx}.to_gates.bias"]).sigmoid()
     o = o.reshape(B + (seq, heads, dh)) * gates.reshape(B + (seq, heads, 1))
     return big_linear(o.reshape(B + (seq, hd)), w[f"{pfx}.to_out.0.weight"])

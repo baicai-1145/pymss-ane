@@ -60,7 +60,7 @@ def main():
     for T in [64, 128, 256, 512]:
         out = bg.build(T, cfg_full, w, dims)
         t0 = time.time()
-        net = af.compile(out)
+        net = af.compile(af.reduce_sum_to_matmul(out))
         ct = time.time() - t0
         rng = np.random.default_rng(0)
         L = sum(dims)
