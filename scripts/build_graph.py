@@ -189,7 +189,7 @@ def attn(x: af.Tensor, w: dict, cfg: dict, rope, pfx: str) -> af.Tensor:
         sim = q @ ktc                                          # [B,h,S,sz]
         m = sim.amax(-1)                                      # [B,h,S,1]
         e = ((sim - m) * LOG2E).exp2()
-        s = e.sum(-1)
+        s = e @ np.ones((sz, 1), F16)   # row sum as matmul: fp16 narrow accumulator over K=512+ loses ~2e-3/layer
         o = e @ vc                                            # [B,h,S,dh]
         ms.append(m); ss.append(s); os_.append(o)
     if n_ch == 1:
@@ -349,7 +349,10 @@ def main():
 
     t0 = time.time()
     out = build(args.T, cfg, w, dims)
-    net = af.compile(out, build_dir=args.build_dir)
+    net = af.compile(af.reduce_sum_to_matmul(out), build_dir=args.build_dir)
+    # reduce_sum->matmul: narrow fp16 reduce_sum accumulators (K=256/512 attention softmax
+    # denominators) lose digits at depth; the @ones contraction uses wide MAC accumulators
+    # (lossless-or-better). T=256 d=12 parity: cos 0.9965 -> 0.9995.
     print(f"compiled {time.time()-t0:.1f}s, {net.n_ops} ops")
 
     L = sum(dims)
